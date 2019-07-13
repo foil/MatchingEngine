@@ -201,6 +201,17 @@ private:
             return lhs->getTimeStamp() < rhs->getTimeStamp();
         }
     };
+    /*
+     * Here for simplicity I just use 1 hashmap and 2 sets to store the pointer.
+     * Considering most of the orders' prices are concentrated close to the 'current' price,
+     * a more performant data structure could be based upon double linked list:
+     *   std unordered_map with <key: id, value: dlNode>;
+     *   std map with <price, doubleLinkedList<dlNode>> sorted by price;
+     * Each time when it got a new buy or sell, find in map by price, append to the end of
+     * the list or create a new list, insert into hashmap, then iterate the first buy/sell list to trade.
+     * To modify a trade, find the node from hashmap by id, directly remove it from the list,
+     * then modify it and insert again.
+     */
     set<shared_ptr<Trade>, MatchingEngine::priceTimePriority> buys;
     set<shared_ptr<Trade>, MatchingEngine::priceTimePriority> sells;
     unordered_map<string, shared_ptr<Trade>> orderBook;

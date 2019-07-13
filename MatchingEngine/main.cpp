@@ -7,8 +7,10 @@
 //
 
 #include <iostream>
-#include <vector>
+#include <memory>
+#include <unordered_map>
 #include <set>
+#include <utility>
 using namespace std;
 
 enum TradeType {
@@ -34,6 +36,7 @@ public:
     void setType(TradeType t) { type = t; }
     bool isGfd() const { return gfd; }
     int getPrice() const { return price; }
+    void setPrice(int p) { price = p; }
     int getQty() const { return qty; }
     void setQty(int q) { qty = q; };
     const string& getId() const { return id; }
@@ -66,14 +69,32 @@ private:
     unsigned long timestamp;
 };
 
+class Cancel: public Operation {
+public:
+    Cancel(string id):
+    Operation(CANCEL), id(id) {}
+    
+    const string& getId() const { return id; }
+private:
+    string id;
+};
+
+class Print: public Operation {
+public:
+    Print(): Operation(PRINT) {}
+};
+
 class Deal {
 public:
     Deal(string id1, int p1, string id2, int p2, int q):
         id1(id1), id2(id2), price1(p1), price2(p2), qty(q) {}
-    const string & getId1() const { return id1; }
-    const string & getId2() const { return id2; }
-    int getPrice1() const { return price1; }
-    int getPrice2() const { return price2; }
+    friend std::ostream & operator<<(std::ostream& os, Deal const& deal) {
+        os << "TRADE "
+        << deal.id1 << " " << deal.price1 << " " << deal.qty << " "
+        << deal.id2 << " " << deal.price2 << " " << deal.qty
+        << endl;
+        return os;
+    }
 private:
     string id1, id2;
     int price1, price2, qty;
@@ -81,7 +102,7 @@ private:
 
 class OperationFactory {
 public:
-    static Operation* createOperation(string order, unsigned long ts) {
+    static shared_ptr<Operation> createOperation(string order, unsigned long ts) {
         size_t pos = 0;
         string type = parse(order, pos);
         if (type == "BUY")
@@ -90,6 +111,11 @@ public:
             return createBuyOrSellOp(order, pos, ts, false);
         else if (type == "MODIFY")
             return createModifyOp(order, pos, ts);
+        else if (type == "CANCEL")
+            return createCancelOp(order, pos);
+        else if (type == "PRINT")
+            return make_shared<Print>();
+        
         return nullptr;
     }
 private:
@@ -100,48 +126,73 @@ private:
         return token;
     }
 
-    static Operation* createBuyOrSellOp(string order, size_t& pos, unsigned long ts, bool buy) {
-        bool gfd = (parse(order, pos) == "GFD");
-        int price = stoi(parse(order, pos));
-        int qty = stoi(parse(order, pos));
-        string id = parse(order, pos);
-        return new Trade(buy, gfd, price, qty, id, ts);
+    static shared_ptr<Operation> createBuyOrSellOp(string order, size_t& pos, unsigned long ts, bool buy) {
+        try {
+            auto str = parse(order, pos);
+            if (str != "GFD" && str != "IOC")
+                return nullptr;
+            bool gfd = (str == "GFD");
+            int price = stoi(parse(order, pos));
+            int qty = stoi(parse(order, pos));
+            if (price <= 0 || qty <= 0)
+                return nullptr;
+            string id = parse(order, pos);
+            return make_shared<Trade>(buy, gfd, price, qty, id, ts);
+        } catch (...) {
+            return nullptr;
+        }
     }
     
-    static Operation* createModifyOp(string order, size_t pos, unsigned long ts) {
+    static shared_ptr<Operation> createModifyOp(string order, size_t pos, unsigned long ts) {
+        try {
+            string id = parse(order, pos);
+            auto str = parse(order, pos);
+            if (str != "BUY" && str != "SELL")
+                return nullptr;
+            bool buy = (str == "BUY");
+            int price = stoi(parse(order, pos));
+            int qty = stoi(parse(order, pos));
+            if (price <= 0 || qty <= 0)
+                return nullptr;
+            return make_shared<Modify>(id, buy, price, qty, ts);
+        } catch (...) {
+            return nullptr;
+        }
+    }
+    
+    static shared_ptr<Operation> createCancelOp(string order, size_t pos) {
         string id = parse(order, pos);
-        bool buy = (parse(order, pos) == "BUY");
-        int price = stoi(parse(order, pos));
-        int qty = stoi(parse(order, pos));
-        return new Modify(id, buy, price, qty, ts);
+        return make_shared<Cancel>(id);
     }
 };
 
 class MatchingEngine {
 public:
-    void execute(Operation* op) {
-        switch (op->getType()) {
-            case BUY:
-            case SELL:
-                trade(static_cast<Trade*>(op));
-                break;
-            case MODIFY:
-                modify(static_cast<Modify*>(op));
-                break;
-            case CANCEL:
-                cancel(op);
-                break;
-            case PRINT:
-                print(op);
-                break;
-            default:
-                break;
+    void execute(shared_ptr<Operation> op) {
+        if (op) {
+            switch (op->getType()) {
+                case BUY:
+                case SELL:
+                    trade(static_pointer_cast<Trade>(op));
+                    break;
+                case MODIFY:
+                    modify(static_pointer_cast<Modify>(op));
+                    break;
+                case CANCEL:
+                    cancel(static_pointer_cast<Cancel>(op));
+                    break;
+                case PRINT:
+                    print();
+                    break;
+                default:
+                    break;
+            }
         }
     }
 
 private:
-    struct comp {
-        bool operator() (const Trade* lhs, const Trade* rhs) const {
+    struct priceTimePriority {
+        bool operator() (const shared_ptr<Trade>& lhs, const shared_ptr<Trade>& rhs) const {
             if (lhs->getPrice() != rhs->getPrice()) {
                 if (lhs->getType() == BUY)
                     return lhs->getPrice() > rhs->getPrice();
@@ -151,53 +202,59 @@ private:
             return lhs->getTimeStamp() < rhs->getTimeStamp();
         }
     };
-    set<Trade*, MatchingEngine::comp> buys;
-    set<Trade*, MatchingEngine::comp> sells;
-    vector<Deal*> deals;
-
-    void trade(Trade* op) {
-        //  1. insert into order book
-        if (op->getType() == BUY)
-            buys.insert(op);
-        else if (op->getType() == SELL)
-            sells.insert(op);
-        else
+    set<shared_ptr<Trade>, MatchingEngine::priceTimePriority> buys;
+    set<shared_ptr<Trade>, MatchingEngine::priceTimePriority> sells;
+    unordered_map<string, shared_ptr<Trade>> orderBook;
+    
+    void trade(shared_ptr<Trade> op) {
+        //  0. check if same id already existed
+        if (orderBook.find(op->getId()) != orderBook.end())
             return;
+        
+        //  1. insert into order book
+        if (op->getType() == BUY) {
+            buys.insert(op);
+        } else if (op->getType() == SELL) {
+            sells.insert(op);
+        } else
+            return;
+        orderBook.insert(make_pair(op->getId(), op));
+
         //  2. trade
-        auto buyIt = buys.begin(), sellIt = sells.begin();
-        bool curOpCleaned = false;
-        while (buyIt != buys.end() && sellIt != sells.end()) {
-            Trade* buy = *buyIt;
-            Trade* sell = *sellIt;
-            if (buy->getPrice() >= sell->getPrice()) {
-                //  deal
-                deals.push_back(createDeal(buy, sell));
-            }
-            if (buy->getQty() == 0) {
-                buyIt = buys.erase(buyIt);
-                if (buy == op)
-                    curOpCleaned = true;
-                delete buy;
-            } else
-                buyIt++;
-            if (sell->getQty() == 0) {
-                sellIt = sells.erase(sellIt);
-                if (sell == op)
-                    curOpCleaned = true;
-                delete sell;
-            } else
-                sellIt++;
-        }
+        doTrade();
+        
         //  3. clear IOC
-        if (!curOpCleaned && !op->isGfd()) {
+        if (op && !op->isGfd()) {
             if (op->getType() == BUY)
                 buys.erase(op);
             else if (op->getType() == SELL)
                 sells.erase(op);
-            delete op;
+            orderBook.erase(op->getId());
         }
     }
-    Deal* createDeal(Trade* buy, Trade* sell) {
+    
+    void doTrade() {
+        auto buyIt = buys.begin(), sellIt = sells.begin();
+        while (buyIt != buys.end() && sellIt != sells.end()) {
+            auto buy = *buyIt;
+            auto sell = *sellIt;
+            if (buy->getPrice() < sell->getPrice())
+                break;
+            //  deal
+            cout << createDeal(buy, sell) << endl;
+            
+            if (buy->getQty() == 0) {
+                buyIt = buys.erase(buyIt);
+                orderBook.erase(buy->getId());
+            }
+            if (sell->getQty() == 0) {
+                sellIt = sells.erase(sellIt);
+                orderBook.erase(sell->getId());
+            }
+        }
+    }
+    
+    static Deal createDeal(const shared_ptr<Trade>& buy, const shared_ptr<Trade>& sell) {
         int q;
         if (buy->getQty() < sell->getQty()) {
             q = buy->getQty();
@@ -208,30 +265,76 @@ private:
             buy->setQty(buy->getQty() - q);
             sell->setQty(0);
         }
-        string id1, id2;
-        int p1, p2;
-        if (buy->getTimeStamp() < sell->getTimeStamp()) {
-            id1 = buy->getId();
-            id2 = sell->getId();
-            p1 = buy->getPrice();
-            p2 = sell->getPrice();
-        } else {
-            id1 = sell->getId();
-            id2 = buy->getId();
-            p1 = sell->getPrice();
-            p2 = buy->getPrice();
-        }
+        if (buy->getTimeStamp() < sell->getTimeStamp())
+            return Deal(buy->getId(), buy->getPrice(), sell->getId(), sell->getPrice(), q);
+        return Deal(sell->getId(), sell->getPrice(), buy->getId(), buy->getPrice(), q);
+    }
+    
+    shared_ptr<Trade> removeFromPriceBook(string id) {
+        auto orderIt = orderBook.find(id);
+        if (orderIt == orderBook.end())
+            return nullptr;
+        
+        auto ptr = orderIt->second;
+        auto it = buys.find(ptr);
+        if (it == buys.end()) {
+            it = sells.find(ptr);
+            if (it == sells.end())
+                //  should not get here
+                return nullptr;
+            else
+                sells.erase(it);
+        } else
+            buys.erase(it);
+        
+        return ptr;
+    }
+    
+    void modify(shared_ptr<Modify> op) {
+        auto target = removeFromPriceBook(op->getId());
+        if (!target)
+            return;
 
-        return new Deal(id1, p1, id2, p2, q);
+        target->setPrice(op->getPrice());
+        target->setQty(op->getQty());
+        target->setTimeStamp(op->getTimeStamp());
+        if (op->isBuy()) {
+            target->setType(BUY);
+            buys.insert(target);
+        } else {
+            target->setType(SELL);
+            sells.insert(target);
+        }
+        doTrade();
     }
-    void modify(Modify* op) {
-        //if (buys.find(op->getId())
+    
+    void cancel(shared_ptr<Cancel> op) {
+        auto target = removeFromPriceBook(op->getId());
+        if (target)
+            orderBook.erase(target->getId());
     }
-    void cancel(Operation* op) {
-        
+    
+    void print() {
+        cout << "SELL:" << endl;
+        printPriceBook(sells);
+        cout << "BUY:" << endl;
+        printPriceBook(buys);
     }
-    void print(Operation* op) {
-        
+    
+    void printPriceBook(const set<shared_ptr<Trade>, MatchingEngine::priceTimePriority>& pb) {
+        int curPrice = -1, qty = 0;
+        for (const auto & ptr: pb) {
+            if (ptr->getPrice() != curPrice) {
+                if (curPrice != -1)
+                    cout << curPrice << " " << qty << endl;
+                curPrice = ptr->getPrice();
+                qty = ptr->getQty();
+            } else {
+                qty += ptr->getQty();
+            }
+        }
+        if (curPrice != -1)
+            cout << curPrice << " " << qty << endl;
     }
 };
 
@@ -240,9 +343,38 @@ int main(int argc, const char * argv[]) {
     string order;
     MatchingEngine engine;
     unsigned long ts = 0;
-    while (true) {
-        getline(cin, order);
+//    while (getline(cin, order)) {
+//        engine.execute(OperationFactory::createOperation(order, ts++));
+//    }
+//    return 0;
+//}
+    string orders[] = {
+//        "SELL GFD 900 10 order2",
+//        "BUY GFD 1000 10 order1",
+//
+//        "BUY GFD 1000 10 order1",
+//        "BUY GFD 1000 10 order2",
+//        "SELL GFD 900 20 order3",
+//
+//        "BUY GFD 1000 10 order1",
+//        "BUY GFD 1000 10 order2",
+//        "MODIFY order1 BUY 1000 20",
+//        "SELL GFD 900 20 order3",
+//
+//        "BUY GFD 1000 10 order1",
+//        "BUY GFD 1000 20 order2",
+//        "BUY GFD 1001 20 order3",
+//        "SELL GFD 900 20 order4",
+//        "PRINT",
+
+        "BUY GFD 1000 10 ORDER1",
+        "BUY GFD 1010 10 ORDER2",
+        "SELL IOC 1000 30 ORDER3",
+        "PRINT",
+    };
+    for (const auto& order: orders)
         engine.execute(OperationFactory::createOperation(order, ts++));
-    }
+
     return 0;
 }
+

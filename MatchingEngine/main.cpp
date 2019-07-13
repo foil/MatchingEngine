@@ -91,8 +91,7 @@ public:
     friend std::ostream & operator<<(std::ostream& os, Deal const& deal) {
         os << "TRADE "
         << deal.id1 << " " << deal.price1 << " " << deal.qty << " "
-        << deal.id2 << " " << deal.price2 << " " << deal.qty
-        << endl;
+        << deal.id2 << " " << deal.price2 << " " << deal.qty;
         return os;
     }
 private:
@@ -316,14 +315,24 @@ private:
     
     void print() {
         cout << "SELL:" << endl;
-        printPriceBook(sells);
-        cout << "BUY:" << endl;
-        printPriceBook(buys);
-    }
-    
-    void printPriceBook(const set<shared_ptr<Trade>, MatchingEngine::priceTimePriority>& pb) {
         int curPrice = -1, qty = 0;
-        for (const auto & ptr: pb) {
+        for (auto it = sells.rbegin(); it != sells.rend(); it++) {
+            auto ptr = *it;
+            if (ptr->getPrice() != curPrice) {
+                if (curPrice != -1)
+                    cout << curPrice << " " << qty << endl;
+                curPrice = ptr->getPrice();
+                qty = ptr->getQty();
+            } else {
+                qty += ptr->getQty();
+            }
+        }
+        if (curPrice != -1)
+            cout << curPrice << " " << qty << endl;
+        
+        cout << "BUY:" << endl;
+        curPrice = -1; qty = 0;
+        for (const auto & ptr: buys) {
             if (ptr->getPrice() != curPrice) {
                 if (curPrice != -1)
                     cout << curPrice << " " << qty << endl;
@@ -351,10 +360,12 @@ int main(int argc, const char * argv[]) {
     string orders[] = {
 //        "SELL GFD 900 10 order2",
 //        "BUY GFD 1000 10 order1",
-//
+//        "PRINT",
+
 //        "BUY GFD 1000 10 order1",
 //        "BUY GFD 1000 10 order2",
 //        "SELL GFD 900 20 order3",
+//        "PRINT",
 //
 //        "BUY GFD 1000 10 order1",
 //        "BUY GFD 1000 10 order2",
@@ -366,11 +377,12 @@ int main(int argc, const char * argv[]) {
 //        "BUY GFD 1001 20 order3",
 //        "SELL GFD 900 20 order4",
 //        "PRINT",
-
-        "BUY GFD 1000 10 ORDER1",
-        "BUY GFD 1010 10 ORDER2",
-        "SELL IOC 1000 30 ORDER3",
-        "PRINT",
+//
+//        "BUY GFD 1000 10 ORDER1",
+//        "BUY GFD 900 10 ORDER2",
+//        "SELL GFD 1010 30 ORDER3",
+//        "SELL GFD 1020 30 ORDER4",
+//        "PRINT",
     };
     for (const auto& order: orders)
         engine.execute(OperationFactory::createOperation(order, ts++));
